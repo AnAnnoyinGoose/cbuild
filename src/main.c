@@ -17,20 +17,23 @@ int main(int argc, char **argv) {
     .output = "./bin/test",
     .files = CB_STRLIST("main.c"),
     .buildflags = CB_STRLIST("-Wall"),
+    .is_rebuild = 1,
     .flags = CB_STRLIST("C Build") 
   );
   _CB_CREATE_PROJECT(rebuild,
       .name = "cb_rebuild",
       .output = "./bin/cbuild",
       .files = CB_STRLIST("./src/main.c"),
+      .is_rebuild = 1,
       .buildflags = CB_STRLIST("-Wall -lssl -lcrypto")
       );
 
   _CB_PROJECT_BUILD(
       .projects = CB_PROJECT_LIST(rebuild),
       .parallel = 0,
-      .run = 0
+      .run = 0,
      );
+
   _CB_PROJECT_BUILD(
       .projects = CB_PROJECT_LIST(pjt),
       .run = 1,

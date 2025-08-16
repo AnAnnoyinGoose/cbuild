@@ -12,12 +12,12 @@
 
 #if defined(_WIN32)
 #define OS_WIN 1
-#include <windows.h>
 #include <process.h>
+#include <windows.h>
 #else
 #define OS_UNIX 1
-#include <unistd.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #if defined(__APPLE__)
@@ -25,8 +25,9 @@
 #endif
 
 #ifdef CB_DEBUG
-#define CB_DEBUG_LOG(fmt, ...) \
-  fprintf(stderr, "\x1b[36m[DEBUG] %s:%d: " fmt "\x1b[0m\n", __FILE__, __LINE__, ##__VA_ARGS__)
+#define CB_DEBUG_LOG(fmt, ...)                                                 \
+  fprintf(stderr, "\x1b[36m[DEBUG] %s:%d: " fmt "\x1b[0m\n", __FILE__,         \
+          __LINE__, ##__VA_ARGS__)
 #else
 #define CB_DEBUG_LOG(fmt, ...)
 #endif
@@ -56,6 +57,7 @@ typedef struct _CB_PROJECT {
   CB_ARGLIST *buildflags;
   CB_ARGLIST *flags;
   char *compile_command;
+  int is_rebuild;
 } _CB_PROJECT;
 
 typedef struct {
@@ -77,18 +79,20 @@ typedef struct {
     const char **files;                                                        \
     const char **buildflags;                                                   \
     const char **flags;                                                        \
+    int is_rebuild;                                                            \
   } var##_init = {__VA_ARGS__};                                                \
   var->name = var##_init.name;                                                 \
   var->output = var##_init.output;                                             \
   var->files = arglist_new();                                                  \
   var->buildflags = arglist_new();                                             \
   var->flags = arglist_new();                                                  \
+  var->is_rebuild = var##_init.is_rebuild;                                     \
   if (var##_init.files)                                                        \
     arglist_append_array(var->files, var##_init.files);                        \
   if (var##_init.buildflags)                                                   \
     arglist_append_array(var->buildflags, var##_init.buildflags);              \
   if (var##_init.flags)                                                        \
-    arglist_append_array(var->flags, var##_init.flags)
+  arglist_append_array(var->flags, var##_init.flags)
 
 static char *cb_concat_compile_command(_CB_PROJECT *proj) {
   if (!proj || !proj->files || proj->files->count == 0)
@@ -133,7 +137,8 @@ static char *cb_concat_compile_command(_CB_PROJECT *proj) {
 #define _CB_BUILD_COMPILE_COMMAND(proj)                                        \
   do {                                                                         \
     if ((proj)->compile_command) {                                             \
-      CB_DEBUG_LOG("Freeing old compile command for project %s", (proj)->name);\
+      CB_DEBUG_LOG("Freeing old compile command for project %s",               \
+                   (proj)->name);                                              \
       free((proj)->compile_command);                                           \
     }                                                                          \
     (proj)->compile_command = cb_concat_compile_command(proj);                 \
@@ -165,6 +170,9 @@ static void cb_dump_to_console(const _CB_PROJECT *project) {
 
   printf("\nCompile Command:\n  %s\n",
          project->compile_command ? project->compile_command : "(null)");
+
+  printf("\nRebuild: %s\n", project->is_rebuild ? "true" : "false");
+
   printf(COLOR_CYAN "====================\n" COLOR_RESET);
 }
 
@@ -189,8 +197,9 @@ static void cb_free_project(_CB_PROJECT *project) {
 static char *cb_compute_md5(const char *data, size_t len) {
   unsigned char digest[MD5_DIGEST_LENGTH];
   MD5((const unsigned char *)data, len, digest);
-  char *out = (char *) malloc(MD5_DIGEST_LENGTH * 2 + 1);
-  if (!out) return NULL;
+  char *out = (char *)malloc(MD5_DIGEST_LENGTH * 2 + 1);
+  if (!out)
+    return NULL;
   for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
     sprintf(out + i * 2, "%02x", digest[i]);
   }
@@ -212,7 +221,7 @@ static char *cb_read_file_content(const char *filepath, size_t *out_len) {
     return NULL;
   }
   rewind(f);
-  char *buffer = (char *) malloc(size);
+  char *buffer = (char *)malloc(size);
   if (!buffer) {
     CB_DEBUG_LOG("Failed to allocate buffer for file content: %s", filepath);
     fclose(f);
@@ -227,7 +236,8 @@ static char *cb_read_file_content(const char *filepath, size_t *out_len) {
 }
 
 static char *cb_compute_project_checksum(_CB_PROJECT *proj) {
-  if (!proj) return NULL;
+  if (!proj)
+    return NULL;
 
   CB_DEBUG_LOG("Computing checksum for project %s", proj->name);
 
@@ -241,7 +251,8 @@ static char *cb_compute_project_checksum(_CB_PROJECT *proj) {
       MD5_Update(&ctx, fcontent, flen);
       free(fcontent);
     } else {
-      CB_DEBUG_LOG("Warning: failed to read file %s for checksum", proj->files->list[i]);
+      CB_DEBUG_LOG("Warning: failed to read file %s for checksum",
+                   proj->files->list[i]);
     }
   }
 
@@ -252,8 +263,9 @@ static char *cb_compute_project_checksum(_CB_PROJECT *proj) {
   unsigned char digest[MD5_DIGEST_LENGTH];
   MD5_Final(digest, &ctx);
 
-  char *checksum = (char*) malloc(MD5_DIGEST_LENGTH * 2 + 1);
-  if (!checksum) return NULL;
+  char *checksum = (char *)malloc(MD5_DIGEST_LENGTH * 2 + 1);
+  if (!checksum)
+    return NULL;
   for (int i = 0; i < MD5_DIGEST_LENGTH; i++) {
     sprintf(checksum + i * 2, "%02x", digest[i]);
   }
@@ -306,7 +318,8 @@ typedef struct {
 } proc_t;
 
 static int proc_start(proc_t *proc, _CB_PROJECT *proj, char **argv) {
-  CB_DEBUG_LOG("Starting process for project %s with command %s", proj->name, argv[0]);
+  CB_DEBUG_LOG("Starting process for project %s with command %s", proj->name,
+               argv[0]);
 #if OS_WIN
   STARTUPINFO si;
   ZeroMemory(&si, sizeof(si));
@@ -338,12 +351,13 @@ static int proc_start(proc_t *proc, _CB_PROJECT *proj, char **argv) {
       strcat(cmdline, "\"");
   }
 
-  BOOL success = CreateProcess(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si,
-                               &proc->pi);
+  BOOL success = CreateProcess(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL,
+                               &si, &proc->pi);
   free(cmdline);
 
   if (!success) {
-    fprintf(stderr, COLOR_RED "[error] Failed to start process %s\n" COLOR_RESET,
+    fprintf(stderr,
+            COLOR_RED "[error] Failed to start process %s\n" COLOR_RESET,
             argv[0]);
     proc->running = 0;
     return -1;
@@ -384,7 +398,8 @@ static int proc_poll(proc_t *proc) {
     CloseHandle(proc->pi.hProcess);
     CloseHandle(proc->pi.hThread);
     proc->running = 0;
-    CB_DEBUG_LOG("Process finished for project %s with exit code %d", proc->project->name, (int)code);
+    CB_DEBUG_LOG("Process finished for project %s with exit code %d",
+                 proc->project->name, (int)code);
     return (int)code;
   }
   return -1;
@@ -397,10 +412,12 @@ static int proc_poll(proc_t *proc) {
     proc->running = 0;
     if (WIFEXITED(status)) {
       int exit_code = WEXITSTATUS(status);
-      CB_DEBUG_LOG("Process finished for project %s with exit code %d", proc->project->name, exit_code);
+      CB_DEBUG_LOG("Process finished for project %s with exit code %d",
+                   proc->project->name, exit_code);
       return exit_code;
     } else {
-      CB_DEBUG_LOG("Process for project %s ended abnormally", proc->project->name);
+      CB_DEBUG_LOG("Process for project %s ended abnormally",
+                   proc->project->name);
       return -1;
     }
   }
@@ -409,7 +426,8 @@ static int proc_poll(proc_t *proc) {
 }
 
 static void proc_wait_all(proc_t *procs, int count) {
-  CB_DEBUG_LOG("Waiting for all parallel processes to finish (%d procs)", count);
+  CB_DEBUG_LOG("Waiting for all parallel processes to finish (%d procs)",
+               count);
   int running = count;
   while (running > 0) {
     running = 0;
@@ -465,19 +483,23 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
     _CB_BUILD_COMPILE_COMMAND(proj);
 
     char checksum_file[512];
-    snprintf(checksum_file, sizeof(checksum_file), ".cb_checksum_%s", proj->name);
+    snprintf(checksum_file, sizeof(checksum_file), ".cb_checksum_%s",
+             proj->name);
 
     char *new_checksum = cb_compute_project_checksum(proj);
     char *old_checksum = cb_read_checksum(checksum_file);
 
     int should_build = 1;
-    if (new_checksum && old_checksum && strcmp(new_checksum, old_checksum) == 0) {
+    if (new_checksum && old_checksum &&
+        strcmp(new_checksum, old_checksum) == 0) {
       should_build = 0;
-      CB_DEBUG_LOG("No changes detected for project %s, skipping build", proj->name);
+      CB_DEBUG_LOG("No changes detected for project %s, skipping build",
+                   proj->name);
     }
 
     if (!should_build) {
-      printf(COLOR_YELLOW "[build] Skipping %s (no changes detected)\n" COLOR_RESET,
+      printf(COLOR_YELLOW
+             "[build] Skipping %s (no changes detected)\n" COLOR_RESET,
              proj->name);
 #ifdef _CB_LOG_TO_FILE
       fprintf(log, "[build] Skipped project: %s\n", proj->name);
@@ -496,7 +518,8 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
 
       clock_t end = clock();
 
-      CB_DEBUG_LOG("Build command exited with code %d for project %s", ret, proj->name);
+      CB_DEBUG_LOG("Build command exited with code %d for project %s", ret,
+                   proj->name);
 
       if (ret != 0) {
         fprintf(stderr, COLOR_RED "[error] Build failed for %s\n" COLOR_RESET,
@@ -525,7 +548,7 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
     // Run executable if requested (and output specified)
     if (config.run && proj->output) {
       int argc = proj->flags ? proj->flags->count : 0;
-      char **argv = (char**) malloc(sizeof(char *) * (argc + 2));
+      char **argv = (char **)malloc(sizeof(char *) * (argc + 2));
       if (!argv) {
         perror("malloc");
         continue;
@@ -542,7 +565,8 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
         argv[j + 1] = proj->flags->list[j];
       argv[argc + 1] = NULL;
 
-      CB_DEBUG_LOG("Preparing to run project %s with executable %s", proj->name, argv[0]);
+      CB_DEBUG_LOG("Preparing to run project %s with executable %s", proj->name,
+                   argv[0]);
 
       if (should_build || config.run_if_skipped) {
         if (config.parallel > 0) {
@@ -551,7 +575,8 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
             if (proc_pool[k].running)
               running_count++;
           }
-          CB_DEBUG_LOG("Currently running %d parallel processes", running_count);
+          CB_DEBUG_LOG("Currently running %d parallel processes",
+                       running_count);
 
           while (running_count >= max_parallel) {
             for (int k = 0; k < max_parallel; k++) {
@@ -572,9 +597,11 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
             if (!proc_pool[k].running) {
               if (proc_start(&proc_pool[k], proj, argv) == 0) {
                 running_count++;
-                CB_DEBUG_LOG("Started parallel process for project %s", proj->name);
+                CB_DEBUG_LOG("Started parallel process for project %s",
+                             proj->name);
               } else {
-                CB_DEBUG_LOG("Failed to start parallel process for project %s", proj->name);
+                CB_DEBUG_LOG("Failed to start parallel process for project %s",
+                             proj->name);
               }
               break;
             }
@@ -586,8 +613,10 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
           STARTUPINFO si;
           ZeroMemory(&si, sizeof(si));
           si.cb = sizeof(si);
-          if (!CreateProcess(NULL, argv[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-            fprintf(stderr, COLOR_RED "[error] Failed to run %s\n" COLOR_RESET, argv[0]);
+          if (!CreateProcess(NULL, argv[0], NULL, NULL, FALSE, 0, NULL, NULL,
+                             &si, &pi)) {
+            fprintf(stderr, COLOR_RED "[error] Failed to run %s\n" COLOR_RESET,
+                    argv[0]);
             CB_DEBUG_LOG("Failed to CreateProcess for %s", argv[0]);
           } else {
             WaitForSingleObject(pi.hProcess, INFINITE);
@@ -604,6 +633,13 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
           } else if (pid > 0) {
             waitpid(pid, NULL, 0);
             CB_DEBUG_LOG("Finished running process %s", argv[0]);
+            if (proj->is_rebuild) {
+              CB_DEBUG_LOG("%s is just a rebuild. Therefore not continuing in "
+                           "the program. If this blocks something you have to "
+                           "run this as the last or rewrite ur logic.",
+                           proj->name);
+              exit(1);
+            }
           } else {
             perror("fork");
             CB_DEBUG_LOG("Failed to fork for running process %s", argv[0]);
@@ -611,7 +647,9 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
 #endif
         }
       } else {
-        CB_DEBUG_LOG("Skipping run for project %s because build was skipped and run_if_skipped not set", proj->name);
+        CB_DEBUG_LOG("Skipping run for project %s because build was skipped "
+                     "and run_if_skipped not set",
+                     proj->name);
       }
 
       free(argv[0]);
@@ -630,4 +668,3 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
 }
 
 #endif // _CBUILD_H
-
