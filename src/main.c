@@ -25,7 +25,6 @@ int main(int argc, char **argv) {
       .output = "./bin/cbuild",
       .files = CB_STRLIST("./src/main.c"),
       .is_rebuild = 1,
-      .buildflags = CB_STRLIST("-Wall -lssl -lcrypto")
       );
 
   _CB_PROJECT_BUILD(

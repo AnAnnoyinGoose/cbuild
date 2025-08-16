@@ -32,15 +32,15 @@ static _CB_PROJECT *other = {0};
 ```
 Let's say you have 3 projects that you want to build. You can do it like this:
 ```c
-_CB_CREATE_PROJECT(this, .name = "This", .files = CB_STRLIST("main1.c"),
-                   .output = "this", .buildflags = CB_STRLIST("-lssl -lcrypto"));
-_CB_CREATE_PROJECT(that, .name = "That", .files = CB_STRLIST("main2.c"),
-                   .output = "that", .buildflags = CB_STRLIST("-lssl -lcrypto"));
-_CB_CREATE_PROJECT(other, .name = "Other", .files = CB_STRLIST("main3.c"),
-                   .output = "other", .buildflags = CB_STRLIST("-lssl -lcrypto"));
+_CB_CREATE_PROJECT(this, .name = "This", .files = CB_STRLIST("main.c"),
+                   .output = "this", .is_rebuild = 1);
+_CB_CREATE_PROJECT(that, .name = "That", .files = CB_STRLIST("main1.c"),
+                   .output = "that");
+_CB_CREATE_PROJECT(other, .name = "Other", .files = CB_STRLIST("main2.c"),
+                   .output = "other");
 ```
-FYI if you have CBUILD in ANY of your projects you need to add the `-lssl` and `-lcrypto` flags.
-- this will be later made easier
+~~FYI if you have CBUILD in ANY of your projects you need to add the `-lssl` and `-lcrypto` flags.~~
+- no longer needed as the `.is_rebuild = 1` flag adds them by default
 Then you can build them like this:
 ```c
 _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(this, that, other), .run = 1);

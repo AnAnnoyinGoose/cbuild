@@ -94,12 +94,16 @@ typedef struct {
   if (var##_init.flags)                                                        \
   arglist_append_array(var->flags, var##_init.flags)
 
+#define CB_NEEDED_LIBS "-lssl -lcrypto"
+
 static char *cb_concat_compile_command(_CB_PROJECT *proj) {
   if (!proj || !proj->files || proj->files->count == 0)
     return strdup("[error] No source files");
 
   size_t total_len = strlen(COMPILER_NAME) + 32;
-
+  
+  if (proj->is_rebuild)
+    total_len += strlen(CB_NEEDED_LIBS) + 2;
   for (int i = 0; i < proj->buildflags->count; i++)
     total_len += strlen(proj->buildflags->list[i]) + 2;
   for (int i = 0; i < proj->files->count; i++)
@@ -118,6 +122,11 @@ static char *cb_concat_compile_command(_CB_PROJECT *proj) {
   for (int i = 0; i < proj->buildflags->count; i++) {
     strcat(cmd, " ");
     strcat(cmd, proj->buildflags->list[i]);
+  }
+
+  if (proj->is_rebuild) {
+    strcat(cmd, " ");
+    strcat(cmd, CB_NEEDED_LIBS);
   }
 
   for (int i = 0; i < proj->files->count; i++) {
