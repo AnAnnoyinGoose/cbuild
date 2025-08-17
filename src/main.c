@@ -28,6 +28,7 @@ int main(int argc, char **argv) {
       .is_rebuild = 1,
       );
 
+
   _CB_PROJECT_BUILD(
       .projects = CB_PROJECT_LIST(rebuild),
       .parallel = 0,
@@ -40,6 +41,10 @@ int main(int argc, char **argv) {
       .parallel = 0,
       .run_if_skipped = 1
       );
+
+
+  cb_free_project(pjt);
+  cb_free_project(rebuild);
 
   return EXIT_SUCCESS;
 }

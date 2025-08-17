@@ -1,76 +1,289 @@
 # C BUILD
+
 ## Description
-A build system library for 1+ C projects.
+
+A lightweight single-header build system library for managing **one or more C projects** — without Makefiles.
+
+It lets you:
+
+* Define build logic directly in C.
+* Build **sequentially** or **in parallel**.
+* Run executables right after building.
+* Automatically handle **self-rebuilding** build scripts.
+* Use **wildcards** for file lists.
+* Extend with your own macros.
+
+---
 
 ## Installation
+
 ```bash
 wget https://raw.githubusercontent.com/AnAnnoyinGoose/cbuild/refs/heads/main/src/lib/stb_cbuild.h -O cbuild.h
 sudo mkdir -p /usr/local/include/cbuild
 sudo cp cbuild.h /usr/local/include/cbuild
 ```
 
-## Usage
-### For rebuilding
+Now include it in your projects:
+
+```c
+#include <cbuild/cbuild.h>
+```
+
+---
+
+## Showcase
+
+This section shows **all functionality** of CBuild.
+
+---
+
+### 1. A simple project
+
+```c
+#include <cbuild/cbuild.h>
+
+static _CB_PROJECT *hello = {0};
+
+int main(void) {
+    _CB_CREATE_PROJECT(hello,
+        .name   = "Hello",
+        .files  = CB_STRLIST("hello.c"),
+        .output = "hello"
+    );
+
+    _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(hello), .run = 1);
+}
+```
+
+➡️ Builds `hello.c`, produces `./hello`, and runs it.
+
+---
+
+### 2. Rebuild mode
+
 ```c
 #include <cbuild/cbuild.h>
 #include <stdio.h>
 
-static _CB_PROJECT *this = {0};
+static _CB_PROJECT *self = {0};
 
-int main() {
-  _CB_CREATE_PROJECT(this, .name = "Rebuild", .files = CB_STRLIST("main.c"),
-                     .output = "rebuild", .buildflags = CB_STRLIST("-lssl -lcrypto"), .is_rebuild = 1);
-  _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(this), .run = 1);
-  printf("Hello world from the rebuild!\n");
-  return 0;
+int main(void) {
+    _CB_CREATE_PROJECT(self,
+        .name       = "Rebuild",
+        .files      = CB_STRLIST("main.c"),
+        .output     = "rebuild",
+        .is_rebuild = 1
+    );
+
+    _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(self), .run = 1);
+
+    printf("You will never see this if rebuild triggers.\n");
 }
 ```
-This will rebuild the project and run the executable. And then exit out of the entire program.
-This is because of the `.is_rebuild = 1` flag. That ensures that the project will get built and run.
-After that *the program will ENTIRELY exit*.
 
-### For building projects
+➡️ With `.is_rebuild = 1`:
+
+* Builds the project.
+* Runs it.
+* Exits the whole process immediately.
+
+---
+
+### 3. Multiple projects
+
 ```c
 #include <cbuild/cbuild.h>
 
-static _CB_PROJECT *this = {0};
-static _CB_PROJECT *that = {0};
-static _CB_PROJECT *other = {0};
-```
-Let's say you have 3 projects that you want to build. You can do it like this:
-```c
-_CB_CREATE_PROJECT(this, .name = "This", .files = CB_STRLIST("main.c"),
-                   .output = "this", .is_rebuild = 1);
-_CB_CREATE_PROJECT(that, .name = "That", .files = CB_STRLIST("main1.c"),
-                   .output = "that");
-_CB_CREATE_PROJECT(other, .name = "Other", .files = CB_STRLIST("main2.c"),
-                   .output = "other");
-```
-~~FYI if you have CBUILD in ANY of your projects you need to add the `-lssl` and `-lcrypto` flags.~~
-- no longer needed as the `.is_rebuild = 1` flag adds them by default
-Then you can build them like this:
-```c
-_CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(this, that, other), .run = 1);
-```
-This will make them run after each other.
-If you want parallel builds, you can use the `.parallel = n` flag.
-Where `n` means how many processes at once will run.
-You can also use the `.run = 0` flag to just build them.
+static _CB_PROJECT *a = {0};
+static _CB_PROJECT *b = {0};
+static _CB_PROJECT *c = {0};
 
+int main(void) {
+    _CB_CREATE_PROJECT(a, .name = "A", .files = CB_STRLIST("a.c"), .output = "a");
+    _CB_CREATE_PROJECT(b, .name = "B", .files = CB_STRLIST("b.c"), .output = "b");
+    _CB_CREATE_PROJECT(c, .name = "C", .files = CB_STRLIST("c.c"), .output = "c");
 
-## Signatures
+    _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(a, b, c), .run = 1);
+}
+```
+
+➡️ Builds projects **sequentially** and runs them in order.
+
+---
+
+### 4. Parallel builds
+
 ```c
-#define     CB_DEBUG
-#define     _CB_LOG_TO_FILE
+_CB_PROJECT_BUILD(
+    .projects = CB_PROJECT_LIST(a, b, c),
+    .run = 0,
+    .parallel = 3
+);
+```
+
+➡️ Builds 3 projects at the same time, **without running them**.
+
+---
+
+### 5. Wildcards
+
+```c
+_CB_CREATE_PROJECT(a,
+    .name   = "Wildcard Example",
+    .files  = CB_STRLIST("src/*.c"),   // expands to all C files in src/
+    .output = "app"
+);
+```
+
+➡️ Automatically expands `*.c` into a list of files.
+
+---
+
+### 6. Build flags
+
+```c
+_CB_CREATE_PROJECT(crypto,
+    .name       = "CryptoTool",
+    .files      = CB_STRLIST("main.c"),
+    .output     = "cryptotool",
+    .buildflags = CB_STRLIST("-lssl -lcrypto")
+);
+```
+
+➡️ Adds extra compiler/linker flags.
+*(Rebuild projects automatically add `-lssl -lcrypto`.)*
+
+---
+
+### 7. Dumping project info
+
+```c
+cb_dump_to_console(crypto);
+```
+
+➡️ Prints details of the project (name, files, output, flags).
+
+---
+
+### 8. Freeing resources
+
+```c
+cb_free_project(crypto);
+```
+
+➡️ Frees memory used by a project.
+
+---
+
+## API Reference
+
+### Macros
+
+```c
+#define     CB_DEBUG              // Enable debug logging
+#define     _CB_LOG_TO_FILE       // Write logs to cbuild.log
+
 MACRO       CB_DEBUG_LOG(fmt, ...); 
-TYPE        _CB_PROJECT
 MACRO       _CB_PROJECT_BUILD(projects, run, parallel, run_if_skipped);
-MACRO       _CB_CREATE_PROJECT(name, output, CB_STRLIST(files), CB_STRLIST(buildflags), CB_STRLIST(flags), is_rebuild); 
+MACRO       _CB_CREATE_PROJECT(name, output, CB_STRLIST(files), CB_STRLIST(buildflags), CB_STRLIST(flags), is_rebuild);
 MACRO       CB_PROJECT_LIST(...);
 MACRO       CB_STRLIST(...);
-FUNC        static void cb_dump_to_console(const _CB_PROJECT*);
-FUNC        static void cb_free_project(const _CB_PROJECT*);
 ```
-These are all of the functions, macros, and types you can use to build your projects.
-The other functions are for internal use.
 
+### Types
+
+```c
+TYPE        _CB_PROJECT   // Represents a single project
+```
+
+### Functions
+
+```c
+static void cb_dump_to_console(const _CB_PROJECT*);  // Print project info
+static void cb_free_project(const _CB_PROJECT*);     // Free memory
+```
+
+---
+
+## Full Demo Program
+
+This example uses **all features at once**:
+
+```c
+#include <cbuild/cbuild.h>
+#include <stdio.h>
+
+static _CB_PROJECT *self   = {0};
+static _CB_PROJECT *lib    = {0};
+static _CB_PROJECT *tool   = {0};
+static _CB_PROJECT *tests  = {0};
+
+int main(void) {
+    // Self-rebuild project (bootstrap)
+    _CB_CREATE_PROJECT(self,
+        .name       = "BuildScript",
+        .files      = CB_STRLIST("main.c"),
+        .output     = "rebuild",
+        .is_rebuild = 1
+    );
+
+    // Library project with wildcards
+    _CB_CREATE_PROJECT(lib,
+        .name   = "MyLibrary",
+        .files  = CB_STRLIST("src/*.c"),   // collect all .c files
+        .output = "libmylib.a"
+    );
+
+    // Tool project with custom flags
+    _CB_CREATE_PROJECT(tool,
+        .name       = "Tool",
+        .files      = CB_STRLIST("tool.c"),
+        .output     = "tool",
+        .buildflags = CB_STRLIST("-lssl -lcrypto")
+    );
+
+    // Test suite project
+    _CB_CREATE_PROJECT(tests,
+        .name   = "Tests",
+        .files  = CB_STRLIST("tests/*.c"),
+        .output = "tests"
+    );
+
+    // Print project info
+    cb_dump_to_console(lib);
+    cb_dump_to_console(tool);
+
+    // Build all projects, run only tests, build others in parallel 
+
+    // Cleanup
+    cb_free_project(lib);
+    cb_free_project(tool);
+    cb_free_project(tests);
+
+    return 0;
+}
+```
+
+➡️ What happens here:
+
+1. **Self-rebuilds** the build script.
+2. Builds a **library** from all `src/*.c`.
+3. Builds a **tool** with extra flags.
+4. Builds and runs a **test suite**.
+5. Uses **parallelism** (`.parallel = 2`).
+6. Dumps project info for debugging.
+7. Frees resources before exiting.
+
+---
+
+## Notes
+
+* Rebuild projects auto-add `-lssl -lcrypto`.
+* Supports **wildcards**, **parallel builds**, and **macro-based configuration**.
+* Debug logging can be redirected to console or file.
+
+---
+
+## License
+
+MIT License – free to use, modify, and distribute.
