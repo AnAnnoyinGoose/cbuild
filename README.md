@@ -2,6 +2,14 @@
 ## Description
 A build system library for 1+ C projects.
 
+## Installation
+```bash
+wget https://raw.githubusercontent.com/AnAnnoyinGoose/cbuild/refs/heads/main/src/lib/cbuild.h -O cbuild.h
+wget https://raw.githubusercontent.com/AnAnnoyinGoose/cbuild/refs/heads/main/src/lib/arglist.h -O arglist.h
+sudo mkdir -p /usr/local/include/cbuild
+sudo cp cbuild.h arglist.h /usr/local/include/cbuild
+```
+
 ## Usage
 ### For rebuilding
 ```c

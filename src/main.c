@@ -1,6 +1,7 @@
 #define _CB_LOG_TO_FILE
 #define CB_DEBUG
-#include "./lib/cbuild.h"
+#define _CB_IMPLEMENTATION
+#include "./lib/stb_cbuild.h"
 
 
 
