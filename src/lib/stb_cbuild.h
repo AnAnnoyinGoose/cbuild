@@ -83,6 +83,7 @@ typedef struct _CB_PROJECT {
   char *compile_command;
   int is_rebuild;
   _CB_BUILD_TYPE build_type;
+  int CB_PYTHON;
 } _CB_PROJECT;
 
 typedef struct {
@@ -113,6 +114,7 @@ typedef struct {
     const char **flags;                                                        \
     int is_rebuild;                                                            \
     _CB_BUILD_TYPE build_type;                                                 \
+    int CB_PYTHON;                                                             \
   } var##_init = {__VA_ARGS__};                                                \
   var->name = var##_init.name;                                                 \
   var->output = var##_init.output;                                             \
@@ -121,6 +123,7 @@ typedef struct {
   var->flags = arglist_new();                                                  \
   var->is_rebuild = var##_init.is_rebuild;                                     \
   var->build_type = var##_init.build_type;                                     \
+  var->CB_PYTHON = var##_init.CB_PYTHON;                                       \
   if (var##_init.files)                                                        \
     arglist_append_array(var->files, var##_init.files);                        \
   if (var##_init.buildflags)                                                   \
@@ -157,7 +160,7 @@ typedef struct {
 #endif
   int running;
   _CB_PROJECT *project;
-  int is_build; 
+  int is_build;
 } proc_t;
 
 static int proc_start_run(proc_t *proc, _CB_PROJECT *proj, char **argv);
@@ -170,6 +173,7 @@ static void proc_wait_all(proc_t *procs, int count);
   _cb_project_build_internal((CB_PROJECT_BUILD_CONFIG){__VA_ARGS__})
 static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config);
 
+#define _CB_IMPLEMENTATION
 //============================= implementation
 //==================================
 #ifdef _CB_IMPLEMENTATION
@@ -377,12 +381,482 @@ static void cb_expand_project_wildcards(_CB_PROJECT *proj) {
   CB_DEBUG_LOG("Wildcard expansion for %s produced %d file(s)", proj->name,
                proj->files->count);
 }
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+// ================= helpers =================
+
+static int cb_count_indent(const char *s) {
+    int n = 0;
+    for (; *s; s++) {
+        if (*s == ' ') n++;
+        else if (*s == '\t') n += 4; // treat tab as 4 spaces
+        else break;
+    }
+    return n;
+}
+
+static char *cb_strdup_printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char *buf = (char*)malloc(n + 1);
+    va_start(ap, fmt);
+    vsnprintf(buf, n + 1, fmt, ap);
+    va_end(ap);
+    return buf;
+}
+
+static void cb_push_line(char ***out, int *count, const char *line) {
+    *out = (char**)realloc(*out, (*count + 1) * sizeof(char*));
+    (*out)[(*count)++] = strdup(line);
+}
+
+static void cb_push_line_indent(char ***out, int *count, int depth, const char *content) {
+    // indent = depth * 2 spaces (just for looks)
+    int pad = depth * 2;
+    char *buf = (char*)malloc(pad + (int)strlen(content) + 1);
+    memset(buf, ' ', pad);
+    strcpy(buf + pad, content);
+    cb_push_line(out, count, buf);
+    free(buf);
+}
+
+// ============== symbol table + typing ==============
+
+typedef struct {
+    char *name;
+    const char *ctype; // "int", "double", "char *"
+} Symbol;
+
+static int sym_find(Symbol *symbols, int n, const char *name) {
+    for (int i = 0; i < n; i++) if (strcmp(symbols[i].name, name) == 0) return i;
+    return -1;
+}
+
+// Very simple token check in expression
+static int expr_mentions_symbol_of_type(const char *expr, Symbol *symbols, int n, const char *ctype) {
+    for (int i = 0; i < n; i++) {
+        if (strcmp(symbols[i].ctype, ctype) != 0) continue;
+        const char *name = symbols[i].name;
+        // crude word-boundary-ish search
+        const char *p = expr;
+        size_t len = strlen(name);
+        while ((p = strstr(p, name)) != NULL) {
+            char b = (p == expr) ? ' ' : p[-1];
+            char a = p[len];
+            int left_ok = !(isalnum((unsigned char)b) || b=='_');
+            int right_ok = !(isalnum((unsigned char)a) || a=='_');
+            if (left_ok && right_ok) return 1;
+            p += len;
+        }
+    }
+    return 0;
+}
+
+static const char *infer_c_type_from_expr(const char *value, Symbol *symbols, int n) {
+    // strings
+    if (value[0] == '"' || value[0] == '\'') return "char *";
+
+    // if expr references a string-typed symbol, treat as string (very naive)
+    if (expr_mentions_symbol_of_type(value, symbols, n, "char *")) return "char *";
+
+    // floats if '.' present and not inside quotes (naive)
+    int dot = 0, inq = 0;
+    for (const char *p = value; *p; p++) {
+        if (*p == '"' || *p == '\'') inq = !inq;
+        if (!inq && *p == '.') { dot = 1; break; }
+    }
+    if (dot) return "double";
+
+    // if references a double var, treat as double
+    if (expr_mentions_symbol_of_type(value, symbols, n, "double")) return "double";
+
+    // default int
+    return "int";
+}
+
+// ============== core: transpile block with braces ==============
+
+static char **transpile_py_block(char **lines, int line_count, int *out_size) {
+    char **out = NULL;
+    *out_size = 0;
+
+    // symbol table for this block
+    Symbol *symbols = NULL;
+    int sym_n = 0;
+
+    // stack of open control blocks; store header indents
+    int indent_stack[256];
+    int depth = 0;
+
+    for (int i = 0; i < line_count; i++) {
+        const char *raw = lines[i];
+
+        // skip blank
+        int k = 0; while (raw[k] == ' ' || raw[k] == '\t') k++;
+        if (raw[k] == '\0') { cb_push_line(&out, out_size, ""); continue; }
+
+        int indent = cb_count_indent(raw);
+        const char *stmt = raw + indent;
+
+        // 1) close blocks on dedent (BEFORE handling current line)
+        while (depth > 0 && indent <= indent_stack[depth - 1]) {
+            depth--;
+            cb_push_line_indent(&out, out_size, depth, "}");
+        }
+
+        // 2) control headers
+        size_t L = strlen(stmt);
+        // trim trailing spaces
+        while (L > 0 && isspace((unsigned char)stmt[L-1])) L--;
+        int ends_colon = (L > 0 && stmt[L-1] == ':');
+
+        if (ends_colon) {
+            // build a temporary trimmed statement without trailing ':'
+            char *head = strndup(stmt, L - 1);
+
+            // if / elif / else / while / for
+            if (strncmp(head, "if ", 3) == 0) {
+                // if (cond) {
+                char *cond = head + 3;
+                char *c_line = cb_strdup_printf("if (%s) {", cond);
+                cb_push_line_indent(&out, out_size, depth, c_line);
+                free(c_line);
+                indent_stack[depth++] = indent; // header indent
+                free(head);
+                continue;
+            }
+
+            if (strncmp(head, "elif ", 5) == 0) {
+                // already closed previous block by dedent; emit "} else if (...) {" at current depth
+                char *cond = head + 5;
+                char *c_line = cb_strdup_printf("else if (%s) {", cond);
+                // place the "} else if" as a single line pair: close already done above, now just open:
+                cb_push_line_indent(&out, out_size, depth, c_line);
+                free(c_line);
+                indent_stack[depth++] = indent;
+                free(head);
+                continue;
+            }
+
+            if (strcmp(head, "else") == 0) {
+                char *c_line = strdup("else {");
+                cb_push_line_indent(&out, out_size, depth, c_line);
+                free(c_line);
+                indent_stack[depth++] = indent;
+                free(head);
+                continue;
+            }
+
+            if (strncmp(head, "while ", 6) == 0) {
+                char *cond = head + 6;
+                char *c_line = cb_strdup_printf("while (%s) {", cond);
+                cb_push_line_indent(&out, out_size, depth, c_line);
+                free(c_line);
+                indent_stack[depth++] = indent;
+                free(head);
+                continue;
+            }
+
+            // for var in range(N):
+            if (strncmp(head, "for ", 4) == 0) {
+                char *var = head + 4;
+                char *in = strstr(var, " in range(");
+                if (in) {
+                    *in = '\0';
+                    char *arg = in + 10;
+                    char *rp = strchr(arg, ')');
+                    if (rp) *rp = '\0';
+                    // sanitize var
+                    while (*var == ' ' || *var == '\t') var++;
+                    char *c_line = cb_strdup_printf("for (int %s = 0; %s < %s; %s++) {", var, var, arg, var);
+                    cb_push_line_indent(&out, out_size, depth, c_line);
+                    free(c_line);
+                    indent_stack[depth++] = indent;
+                    free(head);
+                    continue;
+                }
+            }
+
+            // unrecognized header → comment it
+            char *cmt = cb_strdup_printf("// unhandled header: %s", head);
+            cb_push_line_indent(&out, out_size, depth, cmt);
+            free(cmt);
+            free(head);
+            continue;
+        }
+
+        // 3) simple assignment / reassignment
+        const char *eq = strchr(stmt, '=');
+        if (eq) {
+            // split LHS / RHS
+            int lhs_len = (int)(eq - stmt);
+            char *lhs = strndup(stmt, lhs_len);
+            const char *rhs = eq + 1;
+            // trim
+            int ll = (int)strlen(lhs);
+            while (ll > 0 && isspace((unsigned char)lhs[ll-1])) lhs[--ll] = '\0';
+            while (*rhs == ' ' || *rhs == '\t') rhs++;
+
+            // infer type
+            const char *new_t = infer_c_type_from_expr(rhs, symbols, sym_n);
+            int si = sym_find(symbols, sym_n, lhs);
+
+            if (si < 0) {
+                // declare
+                symbols = (Symbol*)realloc(symbols, (sym_n + 1) * sizeof(Symbol));
+                symbols[sym_n].name = strdup(lhs);
+                symbols[sym_n].ctype = new_t;
+                sym_n++;
+                char *cl = cb_strdup_printf("%s %s = %s;", new_t, lhs, rhs);
+                cb_push_line_indent(&out, out_size, depth, cl);
+                free(cl);
+            } else {
+                if (strcmp(symbols[si].ctype, new_t) != 0) {
+                    char *cl = cb_strdup_printf(
+                        "// Type error: variable '%s' was '%s' but assigned '%s'\nassert(0 && \"Type error: %s expected %s but got %s\");",
+                        lhs, symbols[si].ctype, new_t, lhs, symbols[si].ctype, new_t);
+                    cb_push_line_indent(&out, out_size, depth, cl);
+                    free(cl);
+                } else {
+                    char *cl = cb_strdup_printf("%s = %s;", lhs, rhs);
+                    cb_push_line_indent(&out, out_size, depth, cl);
+                    free(cl);
+                }
+            }
+            free(lhs);
+            continue;
+        }
+
+        // 4) fallback → comment
+        {
+            char *cl = cb_strdup_printf("// unhandled: %s", stmt);
+            cb_push_line_indent(&out, out_size, depth, cl);
+            free(cl);
+        }
+    }
+
+    // close any remaining open blocks
+    while (depth > 0) {
+        depth--;
+        cb_push_line_indent(&out, out_size, depth, "}");
+    }
+
+    // cleanup symbol table
+    for (int i = 0; i < sym_n; i++) free(symbols[i].name);
+    free(symbols);
+
+    return out;
+}
+
+typedef struct {
+  const char *name;
+
+  char *file_data;
+  int file_size;
+
+  char ***code_blocks;
+  int code_block_count;
+  int *code_block_sizes;
+  int *code_block_starts;
+
+} _CB_PROJECT_TRANSPILE;
+
+static void _cb_project_transpile_free(_CB_PROJECT_TRANSPILE *transpile) {
+  for (int i = 0; i < transpile->code_block_count; i++) {
+    for (int j = 0; j < transpile->code_block_sizes[i]; j++) {
+      free(transpile->code_blocks[i][j]); // free each line
+    }
+    free(transpile->code_blocks[i]); // free line array
+  }
+  free(transpile->code_blocks);
+  free(transpile->code_block_sizes);
+  free(transpile->code_block_starts);
+  free(transpile->file_data);
+  free(transpile);
+}
+
+static void _cb_project_transpile_append(_CB_PROJECT_TRANSPILE *transpile,
+                                         char **code_block, int code_block_size,
+                                         int start_line) {
+  transpile->code_blocks =
+      (char ***)realloc(transpile->code_blocks,
+                        (transpile->code_block_count + 1) * sizeof(char **));
+  transpile->code_block_sizes =
+      (int *)realloc(transpile->code_block_sizes,
+                     (transpile->code_block_count + 1) * sizeof(int));
+  transpile->code_block_starts =
+      (int *)realloc(transpile->code_block_starts,
+                     (transpile->code_block_count + 1) * sizeof(int));
+
+  transpile->code_blocks[transpile->code_block_count] = code_block;
+  transpile->code_block_sizes[transpile->code_block_count] = code_block_size;
+  transpile->code_block_starts[transpile->code_block_count] = start_line;
+  transpile->code_block_count++;
+
+  // Debug print
+  CB_DEBUG_LOG("Captured code block #%d starting at line %d (%d lines):",
+               transpile->code_block_count, start_line, code_block_size);
+}
+
+static char *cb_strip_comment_prefix(const char *line) {
+  const char *p = line;
+  while (*p == ' ' || *p == '\t')
+    p++;
+
+  if (p[0] == '/' && p[1] == '/') {
+    p += 2;
+    if (*p == ' ')
+      p++;
+  }
+
+  return strdup(p); // return cleaned line
+}
+static int _py_to_c99(_CB_PROJECT *proj) {
+  for (int i = 0; i < proj->files->count; i++) {
+    const char *f = proj->files->list[i];
+    FILE *fp = fopen(f, "r");
+    if (!fp) {
+      CB_DEBUG_LOG("Failed to open file %s", f);
+      return -1;
+    }
+
+    // read file into memory
+    fseek(fp, 0, SEEK_END);
+    int file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *file_data = (char *)malloc(file_size + 1);
+    if (!file_data) {
+      CB_DEBUG_LOG("Failed to allocate memory for file %s", f);
+      fclose(fp);
+      return -1;
+    }
+    fread(file_data, 1, file_size, fp);
+    file_data[file_size] = '\0';
+    fclose(fp);
+
+    // split into lines
+    int line_count = 0;
+    char **lines = NULL;
+    char *saveptr;
+    char *tok = strtok_r(file_data, "\n", &saveptr);
+    while (tok) {
+      lines = (char **)realloc(lines, (line_count + 1) * sizeof(char *));
+      lines[line_count++] = strdup(tok);
+      tok = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    // process file: detect blocks
+    int in_block = 0;
+    char **current_block = NULL;
+    int current_size = 0;
+    int start_line = 0;
+
+    // new file buffer (lines replaced)
+    char **new_lines = NULL;
+    int new_count = 0;
+
+    for (int j = 0; j < line_count; j++) {
+      const char *line = lines[j];
+      if (!in_block && strstr(line, "__CB_PY_BEGIN")) {
+        in_block = 1;
+        start_line = j;
+        // keep a marker comment in output
+        new_lines =
+            (char **)realloc(new_lines, (new_count + 1) * sizeof(char *));
+        new_lines[new_count++] = strdup("// transpiled block begin");
+        continue;
+      }
+
+      if (in_block && strstr(line, "__CB_PY_END")) {
+        in_block = 0;
+
+        CB_DEBUG_LOG("Captured code block #%d starting at line %d (%d lines):",
+                     new_count, start_line, current_size);
+        for (int k = 0; k < current_size; k++) {
+          CB_DEBUG_LOG("  %s", current_block[k]);
+        }
+        // transpile captured block
+        int out_size = 0;
+        char **c_lines =
+            transpile_py_block(current_block, current_size, &out_size);
+
+        for (int k = 0; k < out_size; k++) {
+          new_lines =
+              (char **)realloc(new_lines, (new_count + 1) * sizeof(char *));
+          new_lines[new_count++] = c_lines[k]; // already malloc’d
+        }
+
+        // cleanup block
+        for (int k = 0; k < current_size; k++)
+          free(current_block[k]);
+        free(current_block);
+        current_block = NULL;
+        current_size = 0;
+
+        new_lines =
+            (char **)realloc(new_lines, (new_count + 1) * sizeof(char *));
+        new_lines[new_count++] = strdup("// transpiled block end");
+        continue;
+      }
+
+      if (in_block) {
+        // capture block lines (strip // prefix)
+        current_block = (char **)realloc(current_block,
+                                         (current_size + 1) * sizeof(char *));
+        current_block[current_size++] = cb_strip_comment_prefix(line);
+      } else {
+        // just copy normal line
+        new_lines =
+            (char **)realloc(new_lines, (new_count + 1) * sizeof(char *));
+        new_lines[new_count++] = strdup(line);
+      }
+    }
+
+    // write file back
+    fp = fopen(f, "w");
+    if (!fp) {
+      CB_DEBUG_LOG("Failed to write file %s", f);
+      return -1;
+    }
+    for (int j = 0; j < new_count; j++) {
+      fprintf(fp, "%s\n", new_lines[j]);
+      free(new_lines[j]);
+    }
+    fclose(fp);
+
+    // cleanup
+    for (int j = 0; j < line_count; j++)
+      free(lines[j]);
+    free(lines);
+    free(new_lines);
+    free(file_data);
+
+    CB_DEBUG_LOG("Transpiled %s", f);
+  }
+  return 0;
+}
+
+#define _CB_PYTHON_TRANSPILE(proj) int ret = _py_to_c99(proj)
 
 //---------- compile command ----------
 static char *cb_concat_compile_command(_CB_PROJECT *proj) {
   if (!proj || !proj->files || proj->files->count == 0)
     return cb_strdup("[error] No source files");
 
+  if (proj->CB_PYTHON) {
+    CB_DEBUG_LOG("Project is set to have _PY() blocks: %s", proj->output);
+    CB_DEBUG_LOG("Will try to transpile into c99.");
+    _CB_PYTHON_TRANSPILE(proj);
+    if (ret != 0) {
+      return cb_strdup("[error] Failed to transpile project");
+    }
+    CB_DEBUG_LOG("Transpilation successful for %s.", proj->output);
+  }
   const char *cc = cb_pick_compiler_name();
   char *cmd = NULL;
   size_t cap = 0, len = 0;
@@ -449,41 +923,45 @@ static char *cb_concat_compile_command(_CB_PROJECT *proj) {
   return cmd;
 }
 
-
 //---------- info & free ----------
 static void _cb_project_dump(_CB_PROJECT *proj) {
-    if (!proj) return;
+  if (!proj)
+    return;
 
-    printf("== Project Dump ==\n");
-    printf("Name: %s\n", proj->name ? proj->name : "(unnamed)");
-    printf("Output: %s\n", proj->output ? proj->output : "(none)");
+  printf("== Project Dump ==\n");
+  printf("Name: %s\n", proj->name ? proj->name : "(unnamed)");
+  printf("Output: %s\n", proj->output ? proj->output : "(none)");
 
-    // Build type
-    const char *type_str = "EXEC";
-    if (proj->build_type == BUILD_STATIC) type_str = "STATIC";
-    else if (proj->build_type == BUILD_SHARED) type_str = "SHARED";
-    printf("Build type: %s\n", type_str);
+  // Build type
+  const char *type_str = "EXEC";
+  if (proj->build_type == BUILD_STATIC)
+    type_str = "STATIC";
+  else if (proj->build_type == BUILD_SHARED)
+    type_str = "SHARED";
+  printf("Build type: %s\n", type_str);
 
-    // Files
-    printf("Files (%d):\n", proj->files ? proj->files->count : 0);
-    if (proj->files) for (int i = 0; i < proj->files->count; i++)
-        printf("  %s\n", proj->files->list[i]);
+  // Files
+  printf("Files (%d):\n", proj->files ? proj->files->count : 0);
+  if (proj->files)
+    for (int i = 0; i < proj->files->count; i++)
+      printf("  %s\n", proj->files->list[i]);
 
-    // Build Flags
-    printf("Build flags (%d):\n", proj->buildflags ? proj->buildflags->count : 0);
-    if (proj->buildflags) for (int i = 0; i < proj->buildflags->count; i++)
-        printf("  %s\n", proj->buildflags->list[i]);
+  // Build Flags
+  printf("Build flags (%d):\n", proj->buildflags ? proj->buildflags->count : 0);
+  if (proj->buildflags)
+    for (int i = 0; i < proj->buildflags->count; i++)
+      printf("  %s\n", proj->buildflags->list[i]);
 
-    // Flags 
-    printf("Flags (%d):\n", proj->flags ? proj->flags->count : 0);
-    if (proj->flags) for (int i = 0; i < proj->flags->count; i++)
-        printf("  %s\n", proj->flags->list[i]);
+  // Flags
+  printf("Flags (%d):\n", proj->flags ? proj->flags->count : 0);
+  if (proj->flags)
+    for (int i = 0; i < proj->flags->count; i++)
+      printf("  %s\n", proj->flags->list[i]);
 
-
-    // Command
-    printf("Compile command: %s\n", proj->compile_command ? proj->compile_command : "(none)");
+  // Command
+  printf("Compile command: %s\n",
+         proj->compile_command ? proj->compile_command : "(none)");
 }
-
 
 static void cb_free_project(_CB_PROJECT *project) {
   if (!project)
@@ -837,7 +1315,7 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
   if (build_jobs == 0) {
     for (int i = 0; i < nproj; i++) {
       printf(COLOR_YELLOW
-             "[build] Skipping %s (no changes detected)\n" COLOR_RESET,
+             "[build] Skipping %s (no changes detected)\n\n" COLOR_RESET,
              items[i].proj->name);
 #ifdef _CB_LOG_TO_FILE
       if (log)
@@ -848,7 +1326,7 @@ static void _cb_project_build_internal(CB_PROJECT_BUILD_CONFIG config) {
     for (int i = 0; i < nproj; i++) {
       if (!items[i].should_build) {
         printf(COLOR_YELLOW
-               "[build] Skipping %s (no changes detected)\n" COLOR_RESET,
+               "[build] Skipping %s (no changes detected)\n\n" COLOR_RESET,
                items[i].proj->name);
         continue;
       }
