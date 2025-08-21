@@ -276,6 +276,70 @@ int main(void) {
 
 ---
 
+
+## Py DSL
+
+This is a [Py DSL](https://en.wikipedia.org/wiki/Domain-specific_language) for CBuild.
+It allows the user to write Python in C projects.
+CBuild translates it to C and compiles it.
+
+### Example
+`main.c`
+```C
+#define _CB_IMPLEMENTATION
+#define CB_DEBUG
+#define _CB_PY // Enable Python support
+#include <cbuild/cbuild.h>
+
+static _CB_PROJECT *this = {0};
+static _CB_PROJECT *CB_PY = {0};
+
+int main(int argc, char *argv[]) {
+  _CB_CREATE_PROJECT(
+      this, .name = "cmpy-rebuild", 
+      .files = CB_STRLIST("src/main.c"), .build_type = BUILD_EXEC, .is_rebuild = 1,
+      .output = "bin/cmpy-rebuild",
+      .buildflags =
+          CB_STRLIST("-std=c99 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE"));
+  _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(this));
+
+  _CB_CREATE_PROJECT(
+      CB_PY, .name = "cmpy", 
+      .files = CB_STRLIST("src/cmpy.c"), .build_type = BUILD_EXEC, .CB_PYTHON = 1, // Sets the project to use the DSL
+      .output = "bin/cmpy",
+      .buildflags =
+          CB_STRLIST("-std=c99"));
+  _CB_PROJECT_BUILD(.projects = CB_PROJECT_LIST(CB_PY), .run = 1, .run_if_skipped = 1);
+
+  printf("rebuild complete\n");
+  return 0;
+}
+```
+
+`src/cmpy.c`
+```C
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+int main(void) {
+// __CB_PY_BEGIN
+// x = 1
+// x = 2
+// 
+// name = "John"
+// surname = "Doe"
+//
+//
+// for i in range(10):
+//    print(x)
+//    x = x*2
+// print("Name: ", name, surname)
+// __CB_PY_END
+  return EXIT_SUCCESS;
+}
+```
+
+
 ## Notes
 
 * Rebuild projects auto-add `-lssl -lcrypto`.
